@@ -69,8 +69,7 @@ class App(tk.Tk):
         hdr.pack(fill="x", padx=24, pady=(22, 0))
         tk.Label(hdr, text="Image Converter",
                  font=("Segoe UI", 15, "bold"), fg=WHITE, bg=BG).pack(side="left")
-        tk.Label(hdr, text="C:\\negative\\",
-                 font=("Segoe UI", 8), fg=DIM, bg=BG).pack(side="right", pady=2)
+      
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=24, pady=(10, 0))
 
