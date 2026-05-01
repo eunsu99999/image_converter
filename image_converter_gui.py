@@ -133,14 +133,6 @@ class App(tk.Tk):
 
         tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
 
-        tk.Button(tb, text="+ 사진 추가",
-                  font=("Segoe UI", 9), fg=TEXT, bg=SURF2,
-                  activeforeground=WHITE, activebackground=BTN_ACT,
-                  relief="flat", cursor="hand2", padx=10, pady=4,
-                  command=self._browse_add).pack(side="left", padx=2)
-
-        tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
-
         tk.Label(tb, text="순서", font=("Segoe UI", 8),
                  fg=SUB, bg=TB_BG).pack(side="left", padx=(0, 4))
 
@@ -153,6 +145,12 @@ class App(tk.Tk):
                       command=cmd).pack(side="left", padx=2)
 
         tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
+
+        tk.Button(tb, text="초기화",
+                  font=("Segoe UI", 9), fg=TEXT, bg=SURF2,
+                  activeforeground=WHITE, activebackground=BTN_ACT,
+                  relief="flat", cursor="hand2", padx=10, pady=4,
+                  command=self._reset).pack(side="left", padx=2)
 
         tk.Button(tb, text="저장",
                   font=("Segoe UI", 9, "bold"), fg=BG, bg=WHITE,
@@ -175,7 +173,7 @@ class App(tk.Tk):
 
         self._placeholder = self.cv.create_text(
             CW // 2, CH // 2,
-            text="사진을 여기에 놓거나\n+ 사진 추가 버튼을 눌러주세요",
+            text="사진을 여기에 놓거나\n클릭해서 추가하세요",
             fill=DIM, font=("Segoe UI", 13), justify="center",
             tags="placeholder",
         )
@@ -205,6 +203,7 @@ class App(tk.Tk):
     # ── Add files ───────────────────────────────────────────────────
     def _browse_add(self):
         paths = filedialog.askopenfilenames(
+            parent=self,
             title="사진 추가",
             filetypes=[("이미지 파일", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.gif"),
                        ("모든 파일", "*.*")])
@@ -395,6 +394,7 @@ class App(tk.Tk):
             self._drag_oy   = my - hit.y
         else:
             self._deselect()
+            self._browse_add()
 
     def _on_drag(self, event):
         if not self._sel or not self._drag_mode:
@@ -421,6 +421,13 @@ class App(tk.Tk):
             self._redraw_item(self._sel)
 
     def _on_release(self, event):
+        if self._drag_mode == "move" and self._sel:
+            item = self._sel
+            if item.x < 0 or item.x > CW or item.y < 0 or item.y > CH:
+                self._items.remove(item)
+                self._sel = None
+                self._redraw_all()
+                return
         self._drag_mode = None
 
     def _on_rclick(self, event):
@@ -498,6 +505,11 @@ class App(tk.Tk):
         self._sel = None
         self._redraw_all()
 
+    def _reset(self):
+        self._items.clear()
+        self._sel = None
+        self._redraw_all()
+
     # ── Save ────────────────────────────────────────────────────────
     def _save(self):
         try:
@@ -510,8 +522,10 @@ class App(tk.Tk):
                 px = int(item.x - img.width  / 2)
                 py = int(item.y - img.height / 2)
                 out.paste(img, (px, py), img)
+            save_dir = os.path.join(OUTPUT_DIR, "edited")
+            os.makedirs(save_dir, exist_ok=True)
             ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dst = os.path.join(OUTPUT_DIR, f"canvas_{ts}.png")
+            dst = os.path.join(save_dir, f"canvas_{ts}.png")
             out.save(dst)
             self._save_lbl.config(text=f"저장됨: {os.path.basename(dst)}", fg=TEXT)
         except Exception as e:
