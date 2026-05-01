@@ -1,0 +1,5 @@
+hwnd=0x000e061e  parent=0x00100620
+  [inner 0x000e061e] old=0x00007ffc35f57690 OK
+  [outer 0x00100620] old=0x00007ffc35f56150 OK
+--- 이 창에 파일을 드래그해서 놓아보세요 ---
+WM_DROPFILES → inner (0xe061e): ['C:\\Users\\user\\OneDrive\\바탕 화면\\media_t_public_0a204d6d9e024022_22_fe_22fe82d9-d490-4d0f-bd26-0b481889c3a1_d63d6ac41c5c4f6cb406474102c8d32d.jpeg', 'C:\\Users\\user\\OneDrive\\바탕 화면\\media_t_public_0a204d6d9e024022_ba_17_ba1772f4-bfb0-458c-b301-619137489afd_d85bd6290f8b4760b624bce72ca0f82c.jpeg', 'C:\\Users\\user\\OneDrive\\바탕 화면\\media_t_public_0a204d6d9e024022_c1_c7_c1c77920-afca-45c5-987c-17b959171dcb_ba627837e3644201ae845d9025ed6b6f.jpeg']

@@ -1,13 +1,14 @@
-import os, sys, traceback
+import os, sys, traceback, math
+from datetime import datetime
 
 OUTPUT_DIR = r"C:\negative"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox
-    from PIL import Image, ImageOps
-    import threading, ctypes
+    from tkinter import filedialog
+    from PIL import Image, ImageOps, ImageTk
+    import ctypes, queue
     from ctypes import wintypes
 except Exception as _e:
     with open(os.path.join(OUTPUT_DIR, "crash.log"), "w", encoding="utf-8") as _f:
@@ -16,7 +17,6 @@ except Exception as _e:
 
 SUPPORTED = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".gif"}
 
-# ── 모노톤 팔레트 ─────────────────────────────────────────────────
 BG      = "#141414"
 SURF    = "#1e1e1e"
 SURF2   = "#282828"
@@ -26,29 +26,76 @@ SUB     = "#707070"
 DIM     = "#484848"
 WHITE   = "#f0f0f0"
 BTN_ACT = "#505050"
+TB_BG   = "#111111"
 
-WM_DROPFILES   = 0x0233
-GWL_WNDPROC    = -4
-WNDPROCTYPE    = ctypes.WINFUNCTYPE(
+CW = 900
+CH = 600
+
+WM_DROPFILES      = 0x0233
+WM_COPYGLOBALDATA = 0x0049
+MSGFLT_ALLOW      = 1
+GWL_WNDPROC       = -4
+WNDPROCTYPE = ctypes.WINFUNCTYPE(
     ctypes.c_longlong,
     wintypes.HWND, ctypes.c_uint,
     wintypes.WPARAM, wintypes.LPARAM,
 )
 
 
+def _apply_img(img: Image.Image, mode: str) -> Image.Image:
+    if mode == "original":
+        return img.convert("RGB")
+    elif mode == "mono":
+        return img.convert("L").convert("RGB")
+    elif mode == "invert":
+        return ImageOps.invert(img.convert("RGB"))
+    else:
+        return ImageOps.invert(img.convert("L")).convert("RGB")
+
+
+class PhotoItem:
+    def __init__(self, path: str, cx: float, cy: float):
+        self.path  = path
+        self.orig  = Image.open(path).convert("RGB")
+        self.mode  = "original"
+        self.x     = cx
+        self.y     = cy
+        w, h       = self.orig.size
+        scale      = min(280 / w, 280 / h, 1.0)
+        self.w     = max(20, int(w * scale))
+        self.h     = max(20, int(h * scale))
+        self.angle = 0.0
+        self.photo: ImageTk.PhotoImage | None = None
+        self.canvas_id: int | None = None
+
+
 class App(tk.Tk):
+    HR = 7
+
     def __init__(self):
         super().__init__()
-        self.title("Image Converter")
+        self.title("캔버스 편집기")
         self.resizable(False, False)
-        self.configure(bg=BG)
+        self.configure(bg=TB_BG)
 
-        self.files: list[str] = []
-        self.mode = tk.StringVar(value="mono")
+        self._items: list[PhotoItem] = []
+        self._sel: PhotoItem | None = None
+        self._drag_mode = None
+        self._drag_ox = 0.0
+        self._drag_oy = 0.0
+        self._resize_start_dist = 1.0
+        self._resize_start_w = 20
+        self._resize_start_h = 20
+        self._rotate_start_angle = 0.0
+        self._rotate_mouse_angle = 0.0
+        self._mode_var = tk.StringVar(value="original")
+        self._drop_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._drop_cbs: list = []
 
         self._build()
         self._center()
         self._setup_drop()
+        self.after(100, self._process_drops)
 
         self.lift()
         self.attributes("-topmost", True)
@@ -62,264 +109,413 @@ class App(tk.Tk):
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"+{x}+{y}")
 
-    # ── UI ────────────────────────────────────────────────────────
+    # ── UI ──────────────────────────────────────────────────────────
     def _build(self):
-        # 헤더
-        hdr = tk.Frame(self, bg=BG)
-        hdr.pack(fill="x", padx=24, pady=(22, 0))
-        tk.Label(hdr, text="Image Converter",
-                 font=("Segoe UI", 15, "bold"), fg=WHITE, bg=BG).pack(side="left")
-      
+        tb = tk.Frame(self, bg=TB_BG, pady=8)
+        tb.pack(fill="x", padx=12)
 
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=24, pady=(10, 0))
+        tk.Label(tb, text="모드", font=("Segoe UI", 8),
+                 fg=SUB, bg=TB_BG).pack(side="left", padx=(0, 4))
 
-        # 드롭 존
-        self.drop_outer = tk.Frame(self, bg=BORDER, padx=1, pady=1)
-        self.drop_outer.pack(padx=24, pady=14)
-
-        self.drop_frame = tk.Frame(self.drop_outer, bg=SURF, width=430, height=148)
-        self.drop_frame.pack()
-        self.drop_frame.pack_propagate(False)
-
-        self.ico_lbl = tk.Label(self.drop_frame, text="+",
-                                font=("Segoe UI", 28), fg=DIM, bg=SURF, cursor="hand2")
-        self.ico_lbl.pack(pady=(26, 4))
-
-        self.main_lbl = tk.Label(self.drop_frame,
-                                 text="이미지를 끌어다 놓거나 클릭해서 선택",
-                                 font=("Segoe UI", 10), fg=SUB, bg=SURF, cursor="hand2")
-        self.main_lbl.pack()
-
-        self.sub_lbl = tk.Label(self.drop_frame,
-                                text="JPG · PNG · BMP · WEBP · TIFF  |  여러 파일 가능",
-                                font=("Segoe UI", 8), fg=DIM, bg=SURF)
-        self.sub_lbl.pack(pady=(3, 0))
-
-        for w in (self.drop_frame, self.ico_lbl, self.main_lbl):
-            w.bind("<Button-1>", lambda e: self._browse())
-
-        # 구분선
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=24)
-
-        # 모드 선택
-        mf = tk.Frame(self, bg=BG, pady=10)
-        mf.pack(padx=24, fill="x")
-
-        modes = [
-            ("mono",          "흑백"),
-            ("negative",      "반전"),
-            ("mono_negative", "흑백 반전"),
-        ]
-        for val, label in modes:
-            rb = tk.Radiobutton(
-                mf, text=label, variable=self.mode, value=val,
-                font=("Segoe UI", 10),
-                fg=SUB, bg=BG,
-                selectcolor=BG,
-                activeforeground=WHITE, activebackground=BG,
-                cursor="hand2",
-                indicatoron=0,
-                relief="flat", bd=0, padx=14, pady=6,
-                command=self._refresh_mode_btns,
+        self._mode_btns = []
+        for val, label in [("original", "원본"), ("mono", "흑백"),
+                            ("invert", "반전"), ("mono_invert", "흑백+반전")]:
+            b = tk.Radiobutton(
+                tb, text=label, variable=self._mode_var, value=val,
+                font=("Segoe UI", 9), fg=SUB, bg=TB_BG, selectcolor=TB_BG,
+                activeforeground=WHITE, activebackground=TB_BG,
+                cursor="hand2", indicatoron=0, relief="flat", bd=0,
+                padx=10, pady=4,
+                command=self._on_mode_change,
             )
-            rb.pack(side="left", padx=(0, 6))
+            b.pack(side="left", padx=2)
+            self._mode_btns.append(b)
 
-        self._mode_btns = mf.winfo_children()
+        tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
+
+        tk.Button(tb, text="+ 사진 추가",
+                  font=("Segoe UI", 9), fg=TEXT, bg=SURF2,
+                  activeforeground=WHITE, activebackground=BTN_ACT,
+                  relief="flat", cursor="hand2", padx=10, pady=4,
+                  command=self._browse_add).pack(side="left", padx=2)
+
+        tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
+
+        tk.Label(tb, text="순서", font=("Segoe UI", 8),
+                 fg=SUB, bg=TB_BG).pack(side="left", padx=(0, 4))
+
+        for label, cmd in [("맨앞", self._to_front), ("앞", self._forward),
+                            ("뒤", self._backward), ("맨뒤", self._to_back)]:
+            tk.Button(tb, text=label,
+                      font=("Segoe UI", 9), fg=TEXT, bg=SURF2,
+                      activeforeground=WHITE, activebackground=BTN_ACT,
+                      relief="flat", cursor="hand2", padx=8, pady=4,
+                      command=cmd).pack(side="left", padx=2)
+
+        tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y", padx=10, pady=2)
+
+        tk.Button(tb, text="저장",
+                  font=("Segoe UI", 9, "bold"), fg=BG, bg=WHITE,
+                  activeforeground=BG, activebackground=TEXT,
+                  relief="flat", cursor="hand2", padx=14, pady=4,
+                  command=self._save).pack(side="left", padx=2)
+
+        self._save_lbl = tk.Label(tb, text="", font=("Segoe UI", 8),
+                                   fg=DIM, bg=TB_BG)
+        self._save_lbl.pack(side="left", padx=8)
+
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+
+        cv_frame = tk.Frame(self, bg=TB_BG)
+        cv_frame.pack()
+
+        self.cv = tk.Canvas(cv_frame, width=CW, height=CH,
+                            bg="#0a0a0a", highlightthickness=0, cursor="arrow")
+        self.cv.pack()
+
+        self._placeholder = self.cv.create_text(
+            CW // 2, CH // 2,
+            text="사진을 여기에 놓거나\n+ 사진 추가 버튼을 눌러주세요",
+            fill=DIM, font=("Segoe UI", 13), justify="center",
+            tags="placeholder",
+        )
+
+        self.cv.bind("<Button-1>",        self._on_press)
+        self.cv.bind("<B1-Motion>",       self._on_drag)
+        self.cv.bind("<ButtonRelease-1>", self._on_release)
+        self.cv.bind("<Button-3>",        self._on_rclick)
+
         self._refresh_mode_btns()
 
-        # 구분선
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=24)
-
-        # 상태
-        self.status_var = tk.StringVar(value="파일을 선택하거나 드래그해서 시작하세요.")
-        self.status_lbl = tk.Label(self, textvariable=self.status_var,
-                                   font=("Segoe UI", 8), fg=DIM, bg=BG,
-                                   wraplength=430, justify="center")
-        self.status_lbl.pack(pady=(8, 4))
-
-        # 버튼
-        bf = tk.Frame(self, bg=BG)
-        bf.pack(pady=(0, 22))
-
-        self.go_btn = tk.Button(
-            bf, text="변환 시작",
-            font=("Segoe UI", 10, "bold"),
-            fg=BG, bg=WHITE, activeforeground=BG, activebackground=TEXT,
-            relief="flat", cursor="hand2", padx=20, pady=7,
-            state="disabled", command=self._start_convert,
-        )
-        self.go_btn.pack(side="left", padx=(0, 6))
-
-        tk.Button(bf, text="초기화",
-                  font=("Segoe UI", 10), fg=SUB, bg=SURF2,
-                  activeforeground=TEXT, activebackground=BTN_ACT,
-                  relief="flat", cursor="hand2", padx=14, pady=7,
-                  command=self._clear).pack(side="left", padx=(0, 6))
-
-        tk.Button(bf, text="폴더 열기",
-                  font=("Segoe UI", 10), fg=SUB, bg=SURF2,
-                  activeforeground=TEXT, activebackground=BTN_ACT,
-                  relief="flat", cursor="hand2", padx=14, pady=7,
-                  command=lambda: os.startfile(OUTPUT_DIR)).pack(side="left")
-
     def _refresh_mode_btns(self):
-        sel = self.mode.get()
-        modes = [("mono", "흑백"), ("negative", "반전"), ("mono_negative", "흑백 반전")]
-        for btn, (val, _) in zip(self._mode_btns, modes):
-            if val == sel:
-                btn.config(fg=WHITE, bg=SURF2, relief="flat")
-            else:
-                btn.config(fg=SUB, bg=BG, relief="flat")
+        sel  = self._mode_var.get()
+        vals = ["original", "mono", "invert", "mono_invert"]
+        for btn, val in zip(self._mode_btns, vals):
+            btn.config(fg=WHITE if val == sel else SUB,
+                       bg=SURF2 if val == sel else TB_BG)
 
-    # ── 드래그앤드롭 (WndProc 서브클래싱) ──────────────────────────
-    def _setup_drop(self):
-        try:
-            hwnd = self.winfo_id()
-            ctypes.windll.shell32.DragAcceptFiles(hwnd, True)
+    # ── Mode ────────────────────────────────────────────────────────
+    def _on_mode_change(self):
+        self._refresh_mode_btns()
+        mode = self._mode_var.get()
+        for item in self._items:
+            item.mode = mode
+        self._redraw_all()
 
-            def wnd_proc(hwnd, msg, wparam, lparam):
-                if msg == WM_DROPFILES:
-                    hDrop = wparam
-                    count = ctypes.windll.shell32.DragQueryFileW(
-                        hDrop, 0xFFFFFFFF, None, 0)
-                    paths = []
-                    for i in range(count):
-                        buf = ctypes.create_unicode_buffer(260)
-                        ctypes.windll.shell32.DragQueryFileW(hDrop, i, buf, 260)
-                        paths.append(buf.value)
-                    ctypes.windll.shell32.DragFinish(hDrop)
-                    self.after(0, lambda p=paths: self._load_files(p))
-                    return 0
-                return ctypes.windll.user32.CallWindowProcW(
-                    self._old_wnd_proc, hwnd, msg, wparam, lparam)
-
-            self._wnd_proc_cb = WNDPROCTYPE(wnd_proc)
-            self._old_wnd_proc = ctypes.windll.user32.SetWindowLongPtrW(
-                hwnd, GWL_WNDPROC, self._wnd_proc_cb)
-        except Exception:
-            pass  # 드래그앤드롭 미지원 환경에서는 클릭으로만 사용
-
-    # ── 파일 처리 ─────────────────────────────────────────────────
-    def _browse(self):
+    # ── Add files ───────────────────────────────────────────────────
+    def _browse_add(self):
         paths = filedialog.askopenfilenames(
-            title="이미지 파일 선택",
-            filetypes=[
-                ("이미지 파일", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.gif"),
-                ("모든 파일", "*.*"),
-            ])
+            title="사진 추가",
+            filetypes=[("이미지 파일", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.gif"),
+                       ("모든 파일", "*.*")])
         if paths:
-            self._load_files(list(paths))
+            self._add_files(list(paths))
 
-    def _load_files(self, paths: list[str]):
+    def _add_files(self, paths: list[str]):
         valid = [p for p in paths if os.path.splitext(p)[1].lower() in SUPPORTED]
         if not valid:
-            self._set_status("지원하지 않는 파일 형식입니다.")
             return
-        self.files = valid
-        names = [os.path.basename(f) for f in valid]
-        label = ", ".join(names[:2]) + (f" 외 {len(names)-2}개" if len(names) > 2 else "")
-        self.main_lbl.config(text=label, fg=TEXT)
-        self.sub_lbl.config(text=f"{len(valid)}개 파일 선택됨")
-        self.ico_lbl.config(text="✓", fg=TEXT)
-        self._set_status(f"{len(valid)}개 파일 준비됨.")
-        self.go_btn.config(state="normal")
-
-    def _clear(self):
-        self.files = []
-        self.ico_lbl.config(text="+", fg=DIM)
-        self.main_lbl.config(text="이미지를 끌어다 놓거나 클릭해서 선택", fg=SUB)
-        self.sub_lbl.config(text="JPG · PNG · BMP · WEBP · TIFF  |  여러 파일 가능")
-        self.go_btn.config(state="disabled")
-        self._set_status("파일을 선택하거나 드래그해서 시작하세요.")
-
-    def _set_status(self, msg, color=DIM):
-        self.status_var.set(msg)
-        self.status_lbl.config(fg=color)
-
-    # ── 변환 ──────────────────────────────────────────────────────
-    def _start_convert(self):
-        if not self.files:
-            return
-        self.go_btn.config(state="disabled", text="변환 중...")
-        threading.Thread(target=self._convert, daemon=True).start()
-
-    def _convert(self):
-        mode = self.mode.get()
-        ok, fail, results = 0, 0, []
-
-        for path in self.files:
+        existing = {item.path for item in self._items}
+        mode = self._mode_var.get()
+        added = False
+        for path in valid:
+            if path in existing:
+                continue
             try:
-                img  = Image.open(path)
-                stem = os.path.splitext(os.path.basename(path))[0]
-                ext  = os.path.splitext(path)[1].lower() or ".jpg"
-                if ext == ".webp":
-                    ext = ".png"
-
-                if mode == "mono":
-                    dst = os.path.join(OUTPUT_DIR, f"{stem}_grayscale{ext}")
-                    img.convert("L").save(dst)
-                    results.append(("ok", os.path.basename(dst)))
-
-                elif mode == "negative":
-                    dst = os.path.join(OUTPUT_DIR, f"{stem}_invert{ext}")
-                    ImageOps.invert(img.convert("RGB")).save(dst)
-                    results.append(("ok", os.path.basename(dst)))
-
-                elif mode == "mono_negative":
-                    dst = os.path.join(OUTPUT_DIR, f"{stem}_bw_invert{ext}")
-                    ImageOps.invert(img.convert("L")).save(dst)
-                    results.append(("ok", os.path.basename(dst)))
-
-                ok += 1
+                n = len(self._items)
+                cx = float(CW // 2 + (n * 24) % 160 - 80)
+                cy = float(CH // 2 + (n * 18) % 120 - 60)
+                item = PhotoItem(path, cx, cy)
+                item.mode = mode
+                self._items.append(item)
+                added = True
             except Exception:
-                fail += 1
-                results.append(("err", os.path.basename(path)))
+                pass
+        if added:
+            self._redraw_all()
 
-        self.after(0, lambda: self._show_result(ok, fail, results))
+    # ── Drag and drop ───────────────────────────────────────────────
+    def _setup_drop(self):
+        try:
+            self.update_idletasks()
+            user32  = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
 
-    def _show_result(self, ok, fail, results):
-        self.go_btn.config(state="normal", text="변환 시작")
-        self._clear()
+            user32.SetWindowLongPtrW.restype  = ctypes.c_longlong
+            user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_longlong)
+            user32.CallWindowProcW.restype    = ctypes.c_longlong
+            user32.CallWindowProcW.argtypes   = (ctypes.c_longlong, wintypes.HWND, ctypes.c_uint,
+                                                  wintypes.WPARAM, wintypes.LPARAM)
 
-        win = tk.Toplevel(self)
-        win.title("완료")
-        win.configure(bg=BG)
-        win.resizable(False, False)
-        win.grab_set()
+            HDROP = wintypes.HANDLE
+            shell32.DragQueryFileW.restype  = ctypes.c_uint
+            shell32.DragQueryFileW.argtypes = (HDROP, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint)
+            shell32.DragFinish.restype      = None
+            shell32.DragFinish.argtypes     = (HDROP,)
+            shell32.DragAcceptFiles.restype  = None
+            shell32.DragAcceptFiles.argtypes = (wintypes.HWND, wintypes.BOOL)
 
-        tk.Label(win, text=f"완료  {ok}개 성공" + (f"  /  {fail}개 실패" if fail else ""),
-                 font=("Segoe UI", 11, "bold"), fg=WHITE, bg=BG).pack(pady=(20, 12))
+            hwnd   = self.winfo_id()
+            parent = user32.GetParent(hwnd)
 
-        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=20)
+            def make_proc(old_ref):
+                def wnd_proc(h, msg, wp, lp):
+                    if msg == WM_DROPFILES:
+                        count = shell32.DragQueryFileW(wp, 0xFFFFFFFF, None, 0)
+                        ps = []
+                        for i in range(count):
+                            buf = ctypes.create_unicode_buffer(260)
+                            shell32.DragQueryFileW(wp, i, buf, 260)
+                            ps.append(buf.value)
+                        shell32.DragFinish(wp)
+                        self._drop_queue.put_nowait(ps)
+                        return 0
+                    return user32.CallWindowProcW(old_ref[0], h, msg, wp, lp)
+                return wnd_proc
 
-        fr = tk.Frame(win, bg=SURF, padx=14, pady=10)
-        fr.pack(padx=20, pady=10, fill="both")
-        for status, name in results:
-            color = TEXT if status == "ok" else SUB
-            mark  = "✓" if status == "ok" else "✗"
-            tk.Label(fr, text=f"  {mark}  {name}",
-                     font=("Segoe UI", 9), fg=color, bg=SURF, anchor="w"
-                     ).pack(fill="x", pady=1)
+            for h in filter(None, [hwnd, parent]):
+                shell32.DragAcceptFiles(h, True)
+                try:
+                    user32.ChangeWindowMessageFilterEx(h, WM_DROPFILES,      MSGFLT_ALLOW, None)
+                    user32.ChangeWindowMessageFilterEx(h, WM_COPYGLOBALDATA, MSGFLT_ALLOW, None)
+                except Exception:
+                    pass
+                old_ref    = [0]
+                cb         = WNDPROCTYPE(make_proc(old_ref))
+                cb_addr    = ctypes.cast(cb, ctypes.c_void_p).value
+                old_ref[0] = user32.SetWindowLongPtrW(h, GWL_WNDPROC, cb_addr)
+                self._drop_cbs.append(cb)
+        except Exception:
+            pass
 
-        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=20)
+    def _process_drops(self):
+        try:
+            while True:
+                paths = self._drop_queue.get_nowait()
+                self._add_files(paths)
+        except Exception:
+            pass
+        self.after(100, self._process_drops)
 
-        bf2 = tk.Frame(win, bg=BG)
-        bf2.pack(pady=14)
-        tk.Button(bf2, text="폴더 열기",
-                  font=("Segoe UI", 10, "bold"),
-                  fg=BG, bg=WHITE, activeforeground=BG, activebackground=TEXT,
-                  relief="flat", cursor="hand2", padx=16, pady=6,
-                  command=lambda: os.startfile(OUTPUT_DIR)).pack(side="left", padx=(0, 6))
-        tk.Button(bf2, text="닫기",
-                  font=("Segoe UI", 10), fg=SUB, bg=SURF2,
-                  activeforeground=TEXT, activebackground=BTN_ACT,
-                  relief="flat", cursor="hand2", padx=16, pady=6,
-                  command=win.destroy).pack(side="left")
+    # ── Render ──────────────────────────────────────────────────────
+    def _render_photo(self, item: PhotoItem) -> ImageTk.PhotoImage:
+        img = _apply_img(item.orig.copy(), item.mode)
+        img = img.resize((item.w, item.h), Image.LANCZOS).convert("RGBA")
+        if item.angle % 360 != 0:
+            img = img.rotate(-item.angle, expand=True, resample=Image.BICUBIC)
+        return ImageTk.PhotoImage(img)
 
-        win.update_idletasks()
-        px = self.winfo_x() + (self.winfo_width()  - win.winfo_width())  // 2
-        py = self.winfo_y() + (self.winfo_height() - win.winfo_height()) // 2
-        win.geometry(f"+{px}+{py}")
+    def _redraw_all(self):
+        self.cv.delete("item")
+        self.cv.delete("handle")
+        if not self._items:
+            self.cv.itemconfig("placeholder", state="normal")
+            return
+        self.cv.itemconfig("placeholder", state="hidden")
+        for item in self._items:
+            photo = self._render_photo(item)
+            item.photo = photo
+            item.canvas_id = self.cv.create_image(
+                item.x, item.y, image=photo, anchor="center", tags="item"
+            )
+        if self._sel and self._sel in self._items:
+            self._draw_handles(self._sel)
+
+    def _redraw_item(self, item: PhotoItem):
+        if item.canvas_id is not None:
+            photo = self._render_photo(item)
+            item.photo = photo
+            self.cv.itemconfig(item.canvas_id, image=photo)
+        if self._sel is item:
+            self._draw_handles(item)
+
+    # ── Handles ─────────────────────────────────────────────────────
+    @staticmethod
+    def _rot(cx, cy, x, y, a_deg):
+        a = math.radians(a_deg)
+        dx, dy = x - cx, y - cy
+        return (cx + dx * math.cos(a) - dy * math.sin(a),
+                cy + dx * math.sin(a) + dy * math.cos(a))
+
+    def _corners(self, item: PhotoItem):
+        hw, hh = item.w / 2, item.h / 2
+        return [self._rot(item.x, item.y, item.x + dx, item.y + dy, item.angle)
+                for dx, dy in [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]]
+
+    def _rot_handle_pos(self, item: PhotoItem):
+        return self._rot(item.x, item.y, item.x, item.y - item.h / 2 - 26, item.angle)
+
+    def _draw_handles(self, item: PhotoItem):
+        self.cv.delete("handle")
+        corners = self._corners(item)
+        pts = [v for c in corners for v in c]
+        self.cv.create_polygon(pts, outline="#4fc3f7", fill="", width=1, tags="handle")
+        r = self.HR
+        for cx, cy in corners:
+            self.cv.create_rectangle(cx - r, cy - r, cx + r, cy + r,
+                                     outline="#4fc3f7", fill=SURF2, tags="handle")
+        rx, ry = self._rot_handle_pos(item)
+        top_cx = (corners[0][0] + corners[1][0]) / 2
+        top_cy = (corners[0][1] + corners[1][1]) / 2
+        self.cv.create_line(top_cx, top_cy, rx, ry, fill="#ffb74d", width=1, tags="handle")
+        self.cv.create_oval(rx - r, ry - r, rx + r, ry + r,
+                             outline="#ffb74d", fill=SURF2, tags="handle")
+
+    # ── Mouse ───────────────────────────────────────────────────────
+    def _on_press(self, event):
+        mx, my = float(event.x), float(event.y)
+
+        if self._sel:
+            for cx, cy in self._corners(self._sel):
+                if math.hypot(mx - cx, my - cy) <= self.HR + 3:
+                    dist = math.hypot(cx - self._sel.x, cy - self._sel.y)
+                    self._drag_mode         = "resize"
+                    self._resize_start_dist = max(dist, 1)
+                    self._resize_start_w    = self._sel.w
+                    self._resize_start_h    = self._sel.h
+                    return
+            rx, ry = self._rot_handle_pos(self._sel)
+            if math.hypot(mx - rx, my - ry) <= self.HR + 3:
+                self._drag_mode           = "rotate"
+                self._rotate_start_angle  = self._sel.angle
+                self._rotate_mouse_angle  = math.degrees(
+                    math.atan2(my - self._sel.y, mx - self._sel.x))
+                return
+
+        hit = None
+        for item in reversed(self._items):
+            if self._hit_test(item, mx, my):
+                hit = item
+                break
+
+        if hit:
+            self._select(hit)
+            self._drag_mode = "move"
+            self._drag_ox   = mx - hit.x
+            self._drag_oy   = my - hit.y
+        else:
+            self._deselect()
+
+    def _on_drag(self, event):
+        if not self._sel or not self._drag_mode:
+            return
+        mx, my = float(event.x), float(event.y)
+
+        if self._drag_mode == "move":
+            self._sel.x = mx - self._drag_ox
+            self._sel.y = my - self._drag_oy
+            self.cv.coords(self._sel.canvas_id, self._sel.x, self._sel.y)
+            self._draw_handles(self._sel)
+
+        elif self._drag_mode == "resize":
+            dist  = math.hypot(mx - self._sel.x, my - self._sel.y)
+            scale = dist / self._resize_start_dist
+            self._sel.w = max(20, int(self._resize_start_w * scale))
+            self._sel.h = max(20, int(self._resize_start_h * scale))
+            self._redraw_item(self._sel)
+
+        elif self._drag_mode == "rotate":
+            cur   = math.degrees(math.atan2(my - self._sel.y, mx - self._sel.x))
+            delta = cur - self._rotate_mouse_angle
+            self._sel.angle = (self._rotate_start_angle + delta) % 360
+            self._redraw_item(self._sel)
+
+    def _on_release(self, event):
+        self._drag_mode = None
+
+    def _on_rclick(self, event):
+        mx, my = float(event.x), float(event.y)
+        hit = None
+        for item in reversed(self._items):
+            if self._hit_test(item, mx, my):
+                hit = item
+                break
+        if not hit:
+            return
+        self._select(hit)
+        menu = tk.Menu(self, tearoff=0, bg=SURF2, fg=TEXT,
+                       activebackground=BTN_ACT, activeforeground=WHITE,
+                       relief="flat", bd=0)
+        menu.add_command(label="맨앞으로", command=self._to_front)
+        menu.add_command(label="앞으로",   command=self._forward)
+        menu.add_command(label="뒤로",     command=self._backward)
+        menu.add_command(label="맨뒤로",   command=self._to_back)
+        menu.add_separator()
+        menu.add_command(label="삭제",     command=self._delete_sel)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _hit_test(self, item: PhotoItem, mx: float, my: float) -> bool:
+        dx, dy = mx - item.x, my - item.y
+        a  = math.radians(-item.angle)
+        lx = dx * math.cos(a) - dy * math.sin(a)
+        ly = dx * math.sin(a) + dy * math.cos(a)
+        return abs(lx) <= item.w / 2 and abs(ly) <= item.h / 2
+
+    def _select(self, item: PhotoItem):
+        self._sel = item
+        self._draw_handles(item)
+
+    def _deselect(self):
+        self._sel = None
+        self.cv.delete("handle")
+
+    # ── Layer order ─────────────────────────────────────────────────
+    def _to_front(self):
+        if not self._sel or self._sel not in self._items:
+            return
+        self._items.append(self._items.pop(self._items.index(self._sel)))
+        self._redraw_all()
+
+    def _forward(self):
+        if not self._sel:
+            return
+        i = self._items.index(self._sel)
+        if i < len(self._items) - 1:
+            self._items[i], self._items[i + 1] = self._items[i + 1], self._items[i]
+            self._redraw_all()
+
+    def _backward(self):
+        if not self._sel:
+            return
+        i = self._items.index(self._sel)
+        if i > 0:
+            self._items[i], self._items[i - 1] = self._items[i - 1], self._items[i]
+            self._redraw_all()
+
+    def _to_back(self):
+        if not self._sel or self._sel not in self._items:
+            return
+        self._items.insert(0, self._items.pop(self._items.index(self._sel)))
+        self._redraw_all()
+
+    def _delete_sel(self):
+        if not self._sel:
+            return
+        self._items.remove(self._sel)
+        self._sel = None
+        self._redraw_all()
+
+    # ── Save ────────────────────────────────────────────────────────
+    def _save(self):
+        try:
+            out = Image.new("RGB", (CW, CH), "black")
+            for item in self._items:
+                img = _apply_img(item.orig.copy(), item.mode)
+                img = img.resize((item.w, item.h), Image.LANCZOS).convert("RGBA")
+                if item.angle % 360 != 0:
+                    img = img.rotate(-item.angle, expand=True, resample=Image.BICUBIC)
+                px = int(item.x - img.width  / 2)
+                py = int(item.y - img.height / 2)
+                out.paste(img, (px, py), img)
+            ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dst = os.path.join(OUTPUT_DIR, f"canvas_{ts}.png")
+            out.save(dst)
+            self._save_lbl.config(text=f"저장됨: {os.path.basename(dst)}", fg=TEXT)
+        except Exception as e:
+            self._save_lbl.config(text=f"저장 실패: {e}", fg=SUB)
 
 
 if __name__ == "__main__":
